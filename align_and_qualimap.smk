@@ -181,18 +181,18 @@ rule merge_bams_for_multi_run_experiment:
     output:
         bam="aligned/merged/{experiment}.bam"
     params:
-        num_bams=lambda wildcards: len(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])])
+        num_bams=lambda wildcards: len(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])]),
+        bam_list=lambda wildcards: " ".join(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])])
     shell:
         """
-        NUM_BAMS={{params.num_bams}}
+        echo "Merging BAMs for experiment {wildcards.experiment}..."
+        echo "Number of BAMs to merge: '{params.num_bams}'"
+        NUM_BAMS="{params.num_bams}"
         if [ $NUM_BAMS -gt 1 ]; then
-            samtools merge -@ {{threads}} {{output.bam}} {{' '.join(input.bams)}}
+            samtools merge -@ {{threads}} {output.bam} $(echo "{params.bam_list}")
         else
             echo "Error: Attempted to merge BAMs for an experiment with less than 2 runs."
             exit 1
         fi
-        samtools index {{output.bam}}
+        samtools index {output.bam}
         """
-
-
-
