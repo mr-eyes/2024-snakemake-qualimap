@@ -21,7 +21,12 @@ for experiment, runs in run_ids_df.groupby("Experiment")["Run"]:
     else:
         experiment_to_runs[clean_experiment] = clean_runs_list
 
-experiment_to_runs["EXTEST"] = ["TEST2", "TEST2"]
+# experiment_to_runs["EXTEST"] = ["TEST2", "TEST2"]
+
+all_experiment_ids = list(experiment_to_run.keys()) + list(experiment_to_runs.keys())
+
+# Print the number of experiments and runs
+print(f"Number of experiments: {len(all_experiment_ids)}")
 
 # Count experiments based on the number of runs
 single_run_experiments = sum(len(runs) == 1 for runs in experiment_to_runs.values())
@@ -73,8 +78,9 @@ rule all:
         "canFam3.fa.pac",
         expand("fasta/{run_id}.fasta", run_id=run_ids),
         expand("aligned/single/{run_id}.bam", run_id=run_ids),
-        expand("aligned/merged/{experiment}.bam", experiment=experiment_to_runs.keys()),
-        expand("aligned/{experiment}.bam", experiment=experiment_to_run.keys())
+        expand("aligned/merged/{experiment}.bam", experiment=all_experiment_ids),
+        expand("reports/{experiment}_alignment_report.txt", experiment=all_experiment_ids),
+        expand("qualimap/{experiment}/genome_results.txt", experiment=all_experiment_ids),
 
 rule download_genome:
     output: "canFam3.fa"
@@ -135,7 +141,7 @@ rule dump_to_fasta:
         {input.sra_file}
         """
 
-ruleorder: bwa_align > merge_bams_for_multi_run_experiment
+# ruleorder: bwa_align > merge_bams_for_multi_run_experiment 
 
 rule bwa_align:
     priority: 200
@@ -160,39 +166,99 @@ rule bwa_align:
         """
 
 
-rule link_bam_for_single_run_experiment:
-    priority: 250
-    input:
-        bam=lambda wildcards: get_bam_path_for_experiment(wildcards.experiment)
-    output:
-        bam="aligned/{experiment}.bam"
-    shell:
-        """
-        BASEDIR=$(pwd)
-        ln -sf ${{BASEDIR}}/{input.bam} ${{BASEDIR}}/{output.bam}
-        samtools index ${{BASEDIR}}/{output.bam}
-        """
+# rule link_bam_for_single_run_experiment:
+#     priority: 250
+#     input:
+#         bam=lambda wildcards: "aligned/single/" + experiment_to_run.get(wildcards.experiment, "") + ".bam"
+#     output:
+#         bam="aligned/{experiment}.bam"
+#     shell:
+#         """
+#         BASEDIR=$(pwd)
+#         ln -sf ${{BASEDIR}}/{input.bam} ${{BASEDIR}}/{output.bam}
+#         samtools index ${{BASEDIR}}/{output.bam}
+#         """
 
 
-rule merge_bams_for_multi_run_experiment:
-    priority: 250
+# rule merge_bams_for_multi_run_experiment:
+#     priority: 250
+#     input:
+#         bams=lambda wildcards: ["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])]
+#     output:
+#         bam="aligned/merged/{experiment}.bam"
+#     params:
+#         num_bams=lambda wildcards: len(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])]),
+#         bam_list=lambda wildcards: " ".join(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])])
+#     shell:
+#         """
+#         echo "Merging BAMs for experiment {wildcards.experiment}..."
+#         echo "Number of BAMs to merge: '{params.num_bams}'"
+#         NUM_BAMS="{params.num_bams}"
+#         if [ $NUM_BAMS -gt 1 ]; then
+#             samtools merge -@ {{threads}} {output.bam} $(echo "{params.bam_list}")
+#         else
+#             echo "Error: Attempted to merge BAMs for an experiment with less than 2 runs."
+#             exit 1
+#         fi
+#         samtools index {output.bam}
+#         """
+
+rule process_experiment_bams:
     input:
-        bams=lambda wildcards: ["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])]
+        bams=lambda wildcards: ["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, experiment_to_run.get(wildcards.experiment, "").split())]
     output:
         bam="aligned/merged/{experiment}.bam"
-    params:
-        num_bams=lambda wildcards: len(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])]),
-        bam_list=lambda wildcards: " ".join(["aligned/single/" + run_id + ".bam" for run_id in experiment_to_runs.get(wildcards.experiment, [])])
+    run:
+        if len(input.bams) > 1:
+            # If there are multiple BAMs, merge them
+            shell("samtools merge -@ {threads} {output.bam} " + " ".join(input.bams))
+        else:
+            # If there's only one BAM, create a symlink in the merged directory
+            shell("ln -sf $(pwd)/{input.bams[0]} {output.bam}")
+        # Index the final BAM file
+        shell("samtools index {output.bam}")
+
+
+
+rule alignment_report_by_experiment:
+    priority: 300
+    threads: 1 
+    resources:
+        mem_mb = 1024,
+        time = 30,
+        runtime = 30,
+        partition = "bmm"
+    input:
+        aligned = "aligned/merged/{experiment}.bam",
+    output:
+        report = "reports/{experiment}_alignment_report.txt"
     shell:
         """
-        echo "Merging BAMs for experiment {wildcards.experiment}..."
-        echo "Number of BAMs to merge: '{params.num_bams}'"
-        NUM_BAMS="{params.num_bams}"
-        if [ $NUM_BAMS -gt 1 ]; then
-            samtools merge -@ {{threads}} {output.bam} $(echo "{params.bam_list}")
-        else
-            echo "Error: Attempted to merge BAMs for an experiment with less than 2 runs."
-            exit 1
-        fi
-        samtools index {output.bam}
+        samtools flagstat {input.aligned} > {output.report}
+        """
+
+
+rule qualimap:
+    priority: 2
+    threads: 8
+    resources:
+        mem_mb = 32 * 1024,
+        mem_gb = 30,
+        time = lambda wildcards, attempt: 2 * 60 * attempt,
+        runtime = lambda wildcards, attempt: 2 * 60 * attempt,
+        partition = "med2"
+    input:
+        bam = "aligned/merged/{experiment}.bam",
+        gff_ucsc = "GCF_000002285.3_CanFam3_ucsc_exon.gff"
+    output:
+        "qualimap/{experiment}/genome_results.txt",
+    shell:
+        """
+        mkdir -p bam_header/
+
+        # Attempt the qualimap run
+        qualimap bamqc -bam {input.bam} -gff {input.gff_ucsc} --java-mem-size={resources.mem_gb}G -nt {threads} -outdir qualimap/{wildcards.experiment} -outformat HTML
+        
+        # Generate bam header file
+        samtools view -H {input.bam} > bam_header/{wildcards.experiment}.txt
         """
